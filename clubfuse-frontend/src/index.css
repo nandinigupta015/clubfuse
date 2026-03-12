@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+@keyframes marquee {
+  0% {
+    transform: translateX(0);
+  }
+
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee {
+  animation: marquee 25s linear infinite;
+}
+
+body {
+  cursor: default;
+}
+
+button,
+a {
+  cursor: pointer;
+}
+
+/* 🔥 FIX BLINKING TEXT CURSOR EVERYWHERE */
+* {
+  caret-color: transparent;
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  caret-color: auto;
+}
