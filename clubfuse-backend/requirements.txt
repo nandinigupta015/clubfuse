@@ -4,6 +4,6 @@ flask-sqlalchemy
 flask-cors
 werkzeug
 email-validator
-pyodbc
+psycopg2-binary
 python-dotenv
 gunicorn

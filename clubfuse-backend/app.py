@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import pyodbc
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import os
 from dotenv import load_dotenv
 
@@ -12,14 +13,18 @@ CORS(app)
 # ================= DB CONNECTION =================
 
 def get_connection():
-    server = os.getenv("DB_SERVER", "DESKTOP-LF20OIL\\SQLEXPRESS")
-    database = os.getenv("DB_NAME", "ClubFuse")
-    return pyodbc.connect(
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={server};"
-        f"DATABASE={database};"
-        "Trusted_Connection=yes;"
-        "TrustServerCertificate=yes;"
+    # Use DATABASE_URL for Production (Supabase)
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        return psycopg2.connect(db_url)
+    
+    # Fallback to individual vars
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        database=os.getenv("DB_NAME", "postgres"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", "postgres"),
+        port=os.getenv("DB_PORT", "5432")
     )
 
 @app.route("/api/departments")
@@ -75,7 +80,7 @@ def signup():
         # Student & Teacher stored in SAME table
         cursor.execute("""
             INSERT INTO Student (student_id, name, email, dept, phone_no)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
         """, (
             data["student_id"],
             data["name"],
@@ -86,7 +91,7 @@ def signup():
 
         cursor.execute("""
             INSERT INTO Auth (student_id, password, role_id)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
         """, (
             data["student_id"],
             data["password"],
@@ -97,7 +102,7 @@ def signup():
         if data["role_id"] == 2:
             cursor.execute("""
                 INSERT INTO ClubMembers (club_id, student_id, role_id, membership_status)
-                VALUES (?, ?, 2, 'active')
+                VALUES (%s, %s, 2, 'active')
             """, (
                 data["club_id"],
                 data["student_id"]
@@ -138,7 +143,7 @@ def login():
             FROM Student s
             JOIN Auth a ON s.student_id = a.student_id
             JOIN Role r ON a.role_id = r.role_id
-            WHERE s.email = ? AND a.password = ?
+            WHERE s.email = %s AND a.password = %s
         """, (data["email"], data["password"]))
 
         row = cursor.fetchone()
@@ -168,7 +173,7 @@ def student_dashboard(student_id):
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT TOP 3
+            SELECT
                 c.club_id,
                 c.name AS club_name,
                 c.category AS club_category,
@@ -177,6 +182,7 @@ def student_dashboard(student_id):
             FROM Events e
             JOIN Clubs c ON e.club_id = c.club_id
             ORDER BY e.date DESC
+            LIMIT 3
         """)
 
         rows = cursor.fetchall()
@@ -198,7 +204,7 @@ def coordinator_dashboard(student_id):
     cursor.execute("""
         SELECT *
         FROM Coordinator_Dashboard_Data
-        WHERE student_id = ?
+        WHERE student_id = %s
     """, student_id)
 
     rows = cursor.fetchall()
@@ -218,7 +224,7 @@ def create_event():
         cursor.execute("""
             SELECT 1
             FROM ClubMembers
-            WHERE student_id = ? AND club_id = ? AND role_id = 2
+            WHERE student_id = %s AND club_id = %s AND role_id = 2
         """, (
             data["student_id"],
             data["club_id"]
@@ -229,7 +235,7 @@ def create_event():
 
         cursor.execute("""
             INSERT INTO Events (club_id, title, date, venue, description, type)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """, (
             data["club_id"],
             data["title"],
@@ -241,10 +247,10 @@ def create_event():
 
         # Notify all followers of this club about the new event
         cursor.execute("""
-            SELECT student_id FROM ClubFollowers WHERE club_id = ?
+            SELECT student_id FROM ClubFollowers WHERE club_id = %s
         """, (data["club_id"],))
         follower_ids = [row[0] for row in cursor.fetchall()]
-        club_name_row = cursor.execute("SELECT name FROM Clubs WHERE club_id=?", (data["club_id"],)).fetchone()
+        club_name_row = cursor.execute("SELECT name FROM Clubs WHERE club_id=%s", (data["club_id"],)).fetchone()
         club_name = club_name_row[0] if club_name_row else "Your Club"
         for fid in follower_ids:
             _insert_notification(cursor, fid,
@@ -270,7 +276,7 @@ def delete_event(event_id):
             SELECT e.title, e.club_id, c.name
             FROM Events e
             JOIN Clubs c ON e.club_id = c.club_id
-            WHERE e.event_id = ?
+            WHERE e.event_id = %s
         """, (event_id,))
         meta = cursor.fetchone()
 
@@ -278,7 +284,7 @@ def delete_event(event_id):
             DELETE e
             FROM Events e
             JOIN ClubMembers cm ON e.club_id = cm.club_id
-            WHERE e.event_id = ? AND cm.student_id = ? AND cm.role_id = 2
+            WHERE e.event_id = %s AND cm.student_id = %s AND cm.role_id = 2
         """, (event_id, student_id))
 
         if cursor.rowcount == 0:
@@ -289,7 +295,7 @@ def delete_event(event_id):
         if meta:
             event_title, club_id, club_name = meta
             cursor.execute("""
-                SELECT student_id FROM ClubFollowers WHERE club_id = ?
+                SELECT student_id FROM ClubFollowers WHERE club_id = %s
             """, (club_id,))
             follower_ids = [row[0] for row in cursor.fetchall()]
             for fid in follower_ids:
@@ -345,7 +351,7 @@ def get_events_for_coordinator(student_id):
         FROM Events e
         JOIN Clubs c ON e.club_id = c.club_id
         JOIN ClubMembers cm ON c.club_id = cm.club_id
-        WHERE cm.student_id = ? AND cm.role_id = 2
+        WHERE cm.student_id = %s AND cm.role_id = 2
         ORDER BY e.date
     """, (student_id,))
 
@@ -369,7 +375,7 @@ def event_register():
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT 1 FROM Student WHERE student_id = ?",
+            "SELECT 1 FROM Student WHERE student_id = %s",
             (data["student_id"],)
         )
 
@@ -379,7 +385,7 @@ def event_register():
 
         cursor.execute("""
             SELECT 1 FROM Registrations
-            WHERE student_id = ? AND event_id = ?
+            WHERE student_id = %s AND event_id = %s
         """, (
             data["student_id"],
             data["event_id"]
@@ -391,7 +397,7 @@ def event_register():
 
         cursor.execute("""
             INSERT INTO Registrations (student_id, event_id, date)
-            VALUES (?, ?, GETDATE())
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
         """, (
             data["student_id"],
             data["event_id"]
@@ -412,7 +418,7 @@ def _insert_notification(cursor, student_id, message):
     """Helper: insert one notification row for a student."""
     cursor.execute("""
         INSERT INTO Notifications (student_id, message, read_status, sent_time)
-        VALUES (?, ?, 'unread', GETDATE())
+        VALUES (%s, %s, 'unread', CURRENT_TIMESTAMP)
     """, (student_id, message))
 
 @app.route("/api/clubs/follow", methods=["POST"])
@@ -431,13 +437,10 @@ def follow_club():
 
         # Upsert: ignore if already following
         cursor.execute("""
-            IF NOT EXISTS (
-                SELECT 1 FROM ClubFollowers WHERE club_id=? AND student_id=?
-            )
-            BEGIN
-                INSERT INTO ClubFollowers (club_id, student_id) VALUES (?, ?)
-            END
-        """, (club_id, student_id, club_id, student_id))
+            INSERT INTO ClubFollowers (club_id, student_id)
+            VALUES (%s, %s)
+            ON CONFLICT DO NOTHING
+        """, (club_id, student_id))
 
         # Notify the follower themselves
         _insert_notification(cursor, student_id,
@@ -463,7 +466,7 @@ def unfollow_club():
         conn   = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            DELETE FROM ClubFollowers WHERE club_id=? AND student_id=?
+            DELETE FROM ClubFollowers WHERE club_id=%s AND student_id=%s
         """, (club_id, student_id))
         conn.commit()
         conn.close()
@@ -479,7 +482,7 @@ def get_following(student_id):
         conn   = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT club_id FROM ClubFollowers WHERE student_id=?
+            SELECT club_id FROM ClubFollowers WHERE student_id=%s
         """, (student_id,))
         ids = [row[0] for row in cursor.fetchall()]
         conn.close()
@@ -498,7 +501,7 @@ def get_notifications(student_id):
         cursor.execute("""
             SELECT id, message, read_status, sent_time
             FROM Notifications
-            WHERE student_id = ?
+            WHERE student_id = %s
             ORDER BY sent_time DESC
         """, (student_id,))
         rows    = cursor.fetchall()
@@ -515,7 +518,7 @@ def mark_notification_read(notif_id):
         conn   = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE Notifications SET read_status='read' WHERE id=?
+            UPDATE Notifications SET read_status='read' WHERE id=%s
         """, (notif_id,))
         conn.commit()
         conn.close()
@@ -531,7 +534,7 @@ def mark_all_read(student_id):
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE Notifications SET read_status='read'
-            WHERE student_id=? AND read_status='unread'
+            WHERE student_id=%s AND read_status='unread'
         """, (student_id,))
         conn.commit()
         conn.close()
